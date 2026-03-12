@@ -3,6 +3,16 @@ Accessible Microsoft Word Menu Creator for Akron Family Restaurant
 Follows WCAG 2.1 AA and Microsoft Accessibility Checker standards
 """
 
+import re
+import sys
+import argparse
+
+import requests
+from bs4 import BeautifulSoup
+import pdfplumber
+from PIL import Image
+import pytesseract
+
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
@@ -48,10 +58,93 @@ def create_menu_section(doc, category_heading, items):
 
 
 
-def create_breakfast_menu_data():
-    """Return breakfast menu data"""
-    return {
-        "Breakfast Specials": [
+# existing hardcoded data functions remain for reference but are no longer used by CLI
+
+def parse_html_menu(url):
+    """Fetch the URL and parse menu categories and items into a dict.
+
+    Returns dict {category: [ {name,description,price}, ... ] }
+    """
+    resp = requests.get(url)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    # try to extract page title
+    h1 = soup.find('h1')
+    page_title = h1.get_text(strip=True) if h1 else url
+
+    menu = {}
+    # categories appear as h3, items as h4 with price text nearby
+    for cat in soup.find_all(['h2','h3']):
+        cat_text = cat.get_text(strip=True)
+        # skip non-menu headings
+        if re.search(r'\$\d', cat_text):
+            continue
+        # collect following siblings until next same-level heading
+        items = []
+        for sib in cat.find_next_siblings():
+            if sib.name in ['h2','h3']:
+                break
+            # look for item headings
+            if sib.name in ['h4','h5']:
+                name = sib.get_text(strip=True)
+                # price might be in same element or next text
+                price = ''
+                # look for text nodes that look like price
+                text = sib.get_text(separator=' ').strip()
+                m = re.search(r'(\$?\d+\.?\d*)', text)
+                if m:
+                    price = m.group(1)
+                # description may be in next paragraph
+                desc = ''
+                nxt = sib.find_next_sibling()
+                if nxt and nxt.name == 'p':
+                    desc = nxt.get_text(strip=True)
+                items.append({'name':name,'description':desc,'price':price})
+        if items:
+            menu[cat_text] = items
+    return page_title, menu
+
+
+def parse_pdf_menu(path):
+    """Basic PDF text extraction and simple menu parsing."""
+    text = ''
+    with pdfplumber.open(path) as pdf:
+        for page in pdf.pages:
+            text += page.extract_text() + '\n'
+    return _parse_text_to_menu(path, text)
+
+
+def parse_image_menu(path):
+    """Use OCR to extract text from an image and parse it into a menu."""
+    img = Image.open(path)
+    text = pytesseract.image_to_string(img)
+    return _parse_text_to_menu(path, text)
+
+
+def _parse_text_to_menu(source, text):
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    menu = {}
+    current_cat = None
+    for line in lines:
+        if not re.search(r'\$?\d', line) and len(line) < 50:
+            current_cat = line
+            menu[current_cat] = []
+            continue
+        m = re.search(r'(.+?)\s+\$?(\d+\.?\d*)', line)
+        if m and current_cat:
+            name = m.group(1).strip()
+            price = '$' + m.group(2)
+            menu[current_cat].append({'name':name,'description':'','price':price})
+            continue
+        if current_cat and menu[current_cat]:
+            if not re.search(r'\$?\d', line):
+                menu[current_cat][-1]['description'] += ' ' + line
+    return source, menu
+
+
+def create_menu_section(doc, category_heading, items):
+    """
+    Create an accessible menu section using headings instead of tables.
             {"name": "#1 Breakfast", "description": "2 Eggs, Hashbrowns, Hotcakes or Toast & Coffee", "price": "$10.99"},
             {"name": "#2 The Blimp", "description": "2 Eggs, Hashbrowns, 2 Hotcakes or French Toast & Bacon, Sausage Links, or Ham", "price": "$14.79"},
             {"name": "#3 Avocado Toast with Feta & Tomato", "description": "with 2 Eggs (any style) and Fresh Fruit cup", "price": "$14.99"},
@@ -264,113 +357,62 @@ def create_lunch_dinner_menu_data():
     }
 
 
-def create_accessible_menu_document():
-    """Create the complete accessible menu document"""
+
+
+def build_doc_from_menu(menu_dict, title, output_path):
+    """Generate a Word document from a menu dictionary.
+
+    menu_dict: {category: [ {name,description,price}, ... ] }
+    title: string for document title
+    output_path: path to save .docx
+    """
     doc = Document()
+    # properties
+    doc.core_properties.title = title
+    doc.core_properties.author = "Menu Generator"
+    doc.core_properties.language_id = 1033
     
-    # ===== DOCUMENT PROPERTIES (Critical for Accessibility) =====
-    doc.core_properties.title = "Akron Family Restaurant - Complete Menu"
-    doc.core_properties.author = "Akron Family Restaurant"
-    doc.core_properties.subject = "Breakfast, Lunch, and Dinner Menu"
-    doc.core_properties.language_id = 1033  # English US
+    # main heading
+    doc.add_paragraph(title, style='Title')
+    doc.add_paragraph()  # space
     
-    # ===== MAIN DOCUMENT TITLE =====
-    title = doc.add_paragraph()
-    title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    title_run = title.add_run("Akron Family Restaurant")
-    title_run.font.size = Pt(18)
-    title_run.bold = True
+    for category, items in menu_dict.items():
+        doc.add_heading(category, level=1)
+        for item in items:
+            # combine name and price
+            name = item.get('name','')
+            price = item.get('price','')
+            heading_text = name
+            if price:
+                heading_text += f" — {price}"
+            doc.add_heading(heading_text, level=2)
+            desc = item.get('description','')
+            if desc:
+                doc.add_paragraph(desc)
+            doc.add_paragraph()
     
-    # Subtitle
-    subtitle = doc.add_paragraph()
-    subtitle.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    subtitle_run = subtitle.add_run("Complete Menu - Breakfast, Lunch & Dinner")
-    subtitle_run.font.size = Pt(14)
-    
-    # Contact info
-    contact = doc.add_paragraph()
-    contact.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    contact_run = contact.add_run("250 West Market Street, Akron, OH 44303 | (330) 376-0600")
-    contact_run.font.size = Pt(10)
-    
-    doc.add_paragraph()  # Spacing
-    
-    # ===== BREAKFAST MENU SECTION =====
-    breakfast_heading = doc.add_heading("Breakfast Menu", level=1)
-    breakfast_note = doc.add_paragraph("Served All Day!")
-    breakfast_note_run = breakfast_note.runs[0]
-    breakfast_note_run.italic = True
-    
-    breakfast_data = create_breakfast_menu_data()
-    for category, items in breakfast_data.items():
-        create_menu_section(doc, category, items)
-        doc.add_paragraph()  # Spacing between sections
-    
-    # Page break
+    # footer info
     doc.add_page_break()
+    doc.add_heading("Notes", level=1)
+    doc.add_paragraph("Consuming raw or undercooked meats, poultry, seafood or eggs may increase your risk of food borne illness.")
     
-    # ===== LUNCH & DINNER MENU SECTION =====
-    lunch_dinner_heading = doc.add_heading("Lunch & Dinner Menu", level=1)
-    
-    lunch_dinner_data = create_lunch_dinner_menu_data()
-    
-    # Salad dressings note
-    salad_note = doc.add_paragraph()
-    salad_note_run = salad_note.add_run("Salad Dressings Available: ")
-    salad_note_run.bold = True
-    salad_note.add_run("Ranch, House Bleu Cheese, Sweet'n Sour, House Thousand Island, Honey Mustard, Balsamic Vinaigrette, House Greek, French, Italian. Extra Dressing $0.60")
-    
-    sandwich_note = doc.add_paragraph()
-    sandwich_note_run = sandwich_note.add_run("All Sandwiches: ")
-    sandwich_note_run.bold = True
-    sandwich_note.add_run("Served with Potato Chips. Sub French fries & coleslaw $1.99 extra or sweet potato fries & coleslaw $2.99 extra. Add side salad $2.99 extra. Add extra cheese $0.99 each.")
-    
-    doc.add_paragraph()  # Spacing
-    
-    for category, items in lunch_dinner_data.items():
-        create_menu_section(doc, category, items)
-        doc.add_paragraph()  # Spacing between sections
-    
-    # ===== FOOTER NOTES =====
-    doc.add_page_break()
-    footer_heading = doc.add_heading("Important Information", level=1)
-    
-    allergy_note = doc.add_paragraph()
-    allergy_note_run = allergy_note.add_run("Food Allergies & Safety: ")
-    allergy_note_run.bold = True
-    allergy_note.add_run("Consuming raw or undercooked meats, poultry, seafood or eggs may increase your risk of food borne illness. Please inform your server of any dietary restrictions or allergies.")
-    
-    gratuity_note = doc.add_paragraph()
-    gratuity_note_run = gratuity_note.add_run("Gratuity Policy: ")
-    gratuity_note_run.bold = True
-    gratuity_note.add_run("To maintain fairness for Akron Family's hard working servers, a 20% gratuity will be added to groups of 6 or more.")
-    
-    hours_heading = doc.add_heading("Hours of Operation", level=2)
-    hours_list = [
-        ("Monday - Friday", "5:30 AM - 6:00 PM"),
-        ("Saturday", "5:30 AM - 3:00 PM"),
-        ("Sunday", "7:00 AM - 3:00 PM"),
-        ("Note", "Closed Thanksgiving & Christmas"),
-    ]
-    for day, hours in hours_list:
-        doc.add_paragraph(day, style='Heading 3')
-        doc.add_paragraph(hours)
-    
-    # Save document
-    output_path = r"c:\code\Akron_Family_Restaurant_Menu.docx"
     doc.save(output_path)
-    print(f"✓ Accessible menu document created successfully!")
-    print(f"✓ Saved to: {output_path}")
-    print(f"\nAccessibility Features Included:")
-    print(f"  • Document title and properties set")
-    print(f"  • Proper heading hierarchy (H1, H2, H3)")
-    print(f"  • Items expressed as headings with descriptive paragraphs (no tables)")
-    print(f"  • Clear categorization and organization")
-    print(f"  • Concise, descriptive item descriptions")
-    print(f"  • Language set to English (US)")
-    print(f"  • Important notes for food allergies and safety")
-    print(f"  • Professional formatting for easy navigation")
+    print(f"Saved to {output_path}")
 
 
 if __name__ == "__main__":
-    create_accessible_menu_document()
+    parser = argparse.ArgumentParser(description="Accessible menu to Word converter")
+    parser.add_argument('--url', help='URL of the menu page')
+    parser.add_argument('--pdf', help='Path to PDF menu file')
+    parser.add_argument('--image', help='Path to image file containing menu (JPG/PNG)')
+    parser.add_argument('--output','-o', help='Output docx file', default='menu.docx')
+    args = parser.parse_args()
+    if args.url:
+        title, menu = parse_html_menu(args.url)
+    elif args.pdf:
+        title, menu = parse_pdf_menu(args.pdf)
+    elif args.image:
+        title, menu = parse_image_menu(args.image)
+    else:
+        parser.error("one of --url, --pdf or --image required")
+    build_doc_from_menu(menu, title, args.output)

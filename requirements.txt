@@ -1,0 +1,6 @@
+python-docx
+requests
+beautifulsoup4
+pdfplumber
+pillow
+pytesseract
