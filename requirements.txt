@@ -4,3 +4,4 @@ beautifulsoup4
 pdfplumber
 pillow
 pytesseract
+fpdf
